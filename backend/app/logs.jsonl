@@ -1,1 +1,0 @@
-{"timestamp": "2026-02-11T20:25:21.128692", "action": "ALLOWED", "ip": "127.0.0.1", "prompt": "DROP TABLE users; bash -i", "risk": 0.1}
