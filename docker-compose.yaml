@@ -1,0 +1,26 @@
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: leakguard-backend
+    ports:
+      - "8000:8000"
+    environment:
+      - VPNAPI_KEY=${VPNAPI_KEY:-demo}
+      - HONEYPOT_TARPIT_SECONDS=${HONEYPOT_TARPIT_SECONDS:-10}
+    volumes:
+      # root logs file (your choice)
+      - ./logs.jsonl:/app/logs.jsonl
+      # if your backend writes/reads pentbox logs from repo root
+      - ./honeypot-logs:/app/honeypot-logs
+    restart: unless-stopped
+
+  honeypot:
+    build:
+      context: ./pentbox-honeypot
+      dockerfile: Dockerfile
+    container_name: leakguard-honeypot
+    volumes:
+      - ./honeypot-logs:/honeypot-logs
+    restart: unless-stopped

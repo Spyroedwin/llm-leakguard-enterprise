@@ -1,0 +1,89 @@
+@import "tailwindcss";
+@plugin "tailwindcss-animate";
+
+/* shadcn uses .dark class */
+@custom-variant dark (&:is(.dark *));
+
+/* ✅ Define Tailwind theme colors for utilities like:
+   bg-background, text-foreground, border-border, outline-ring/50, etc.
+*/
+@theme {
+  --radius: 0.625rem;
+
+  --color-background: oklch(1 0 0);
+  --color-foreground: oklch(0.129 0.042 264.695);
+
+  --color-card: oklch(1 0 0);
+  --color-card-foreground: oklch(0.129 0.042 264.695);
+
+  --color-popover: oklch(1 0 0);
+  --color-popover-foreground: oklch(0.129 0.042 264.695);
+
+  --color-primary: oklch(0.208 0.042 265.755);
+  --color-primary-foreground: oklch(0.984 0.003 247.858);
+
+  --color-secondary: oklch(0.968 0.007 247.896);
+  --color-secondary-foreground: oklch(0.208 0.042 265.755);
+
+  --color-muted: oklch(0.968 0.007 247.896);
+  --color-muted-foreground: oklch(0.554 0.046 257.417);
+
+  --color-accent: oklch(0.968 0.007 247.896);
+  --color-accent-foreground: oklch(0.208 0.042 265.755);
+
+  --color-destructive: oklch(0.577 0.245 27.325);
+  --color-destructive-foreground: oklch(0.984 0.003 247.858);
+
+  --color-border: oklch(0.929 0.013 255.508);
+  --color-input: oklch(0.929 0.013 255.508);
+  --color-ring: oklch(0.704 0.04 256.788);
+}
+
+/* Dark theme overrides the SAME --color-* tokens */
+.dark {
+  --color-background: oklch(0.129 0.042 264.695);
+  --color-foreground: oklch(0.984 0.003 247.858);
+
+  --color-card: oklch(0.208 0.042 265.755);
+  --color-card-foreground: oklch(0.984 0.003 247.858);
+
+  --color-popover: oklch(0.208 0.042 265.755);
+  --color-popover-foreground: oklch(0.984 0.003 247.858);
+
+  --color-primary: oklch(0.929 0.013 255.508);
+  --color-primary-foreground: oklch(0.208 0.042 265.755);
+
+  --color-secondary: oklch(0.279 0.041 260.031);
+  --color-secondary-foreground: oklch(0.984 0.003 247.858);
+
+  --color-muted: oklch(0.279 0.041 260.031);
+  --color-muted-foreground: oklch(0.704 0.04 256.788);
+
+  --color-accent: oklch(0.279 0.041 260.031);
+  --color-accent-foreground: oklch(0.984 0.003 247.858);
+
+  --color-destructive: oklch(0.704 0.191 22.216);
+  --color-destructive-foreground: oklch(0.984 0.003 247.858);
+
+  --color-border: oklch(1 0 0 / 10%);
+  --color-input: oklch(1 0 0 / 15%);
+  --color-ring: oklch(0.551 0.027 264.364);
+}
+
+/* ✅ Fix the "half screen" issue: remove Vite default centering */
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    margin: 0;
+    @apply bg-background text-foreground;
+  }
+}

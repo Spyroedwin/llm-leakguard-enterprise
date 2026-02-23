@@ -1,254 +1,436 @@
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import re, json, logging
+import re, json, logging, asyncio, os
 from datetime import datetime
-from pathlib import Path
 from starlette.middleware.base import BaseHTTPMiddleware
+import httpx
 from dotenv import load_dotenv
-import os
+from typing import Dict, List, Any, Optional
 
 load_dotenv()
 
-app = FastAPI(title="LLM LeakGuard Enterprise")
+app = FastAPI(title="LLM LeakGuard Enterprise - Phase 1-4 COMPLETE")
 
-# ---------- CORS ----------
+# -----------------------------
+# CORS (for dashboard frontend)
+# -----------------------------
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],  # dev frontend
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ---------- Config ----------
-BASE_DIR = Path(__file__).resolve().parent.parent  # backend/
-LOG_DIR = BASE_DIR / "logs"
-LOG_DIR.mkdir(parents=True, exist_ok=True)
-LOG_FILE = LOG_DIR / "logs.jsonl"
+# -----------------------------
+# Logging setup (JSONL)
+# -----------------------------
+LOG_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "logs"))
+os.makedirs(LOG_DIR, exist_ok=True)
 
-BLOCK_THRESHOLD = float(os.getenv("BLOCK_THRESHOLD", "0.75"))
+LOG_PATH = os.path.join(LOG_DIR, "leakguard.jsonl")
 
-# ---------- Logging ----------
-logging.basicConfig(
-    filename=str(LOG_FILE),
-    level=logging.INFO,
-    format="%(message)s"
-)
+logger = logging.getLogger("leakguard")
+logger.setLevel(logging.INFO)
 
-# ---------- Threat Patterns (single source of truth) ----------
-THREAT_PATTERNS = {
-    # Phishing-ish
-    "phishing": r"(?=.*\b(bank|paypal|upi|wallet|pan|aadhaar|kyc)\b)(?=.*\b(login|sign\s?in|verify|click|download|reset|update)\b)",
-
-    #govt ids (demo)
-    "gov_id_bait": r"\b(pan\s*card|aadhaar|kyc)\b.*\b(download|click|verify|update)\b",
-
-    # Secrets/credentials (covers: password=123, password:123, password is 123)
-    "secrets": r"\b(api[_-]?key|secret|token|password|passwd|pwd)\b\s*(?:[:=]|is)\s*([^\s,;]+)",
-
-    #PAN Cards
-    "pan": r"\b[A-Z]{5}[0-9]{4}[A-Z]\b",
-    # Common tokens (demo)
-    "github_token": r"\bghp_[A-Za-z0-9]{30,}\b",
-    "jwt": r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b",
-
-    # AWS Access Key ID (AKIA/ASIA etc) demo
-    "aws_key": r"\b(AKI|ASIA)[A-Z0-9]{16}\b",
-
-    # Email addresses
-    "email": r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b",
-
-    # Aadhaar-ish (12 digits spaced/not) demo
-    "aadhaar_like": r"\b\d{4}\s?\d{4}\s?\d{4}\b",
-
-    # Card-ish (13-19 digits) demo (false positives possible)
-    "card_like": r"\b(?:\d[ -]*?){13,19}\b",
-
-    # OTP/PIN/CVV with digits (covers: OTP=123456, otp is 252584)
-    "otp": r"\b(otp|one[-\s]?time\s?password|cvv|pin)\b\s*(?:[:=]|is)?\s*\d{4,8}\b",
-
-    # Malware-ish commands
-    "malware": r"(bash\s+-i)|(curl\s+.*\|\s*bash)|(powershell\s+-enc)",
-
-    # SQLi-ish
-    "sql": r"(\bunion\b\s+\bselect\b)|(\bOR\b\s+1=1)|('?\s*OR\s*'?\d'?\s*=\s*'?\d)",
-
-    # Tor-ish indicators
-    "tor": r"(\.onion\b)|(185\.220\.)",
-
-    # Weak brute-force patterns (demo)
-    "brute": r"\b(admin|password123|qwerty|letmein)\b",
-}
-
-SEVERITY = {
-    "gov_id_bait": 0.8,   # make it block (threshold 0.75)
-    "pan": 0.9,
-    "phishing": 0.8,      # make phishing block too
-    "secrets": 0.9,
-    "github_token": 0.95,
-    "jwt": 0.85,
-    "aws_key": 0.95,
-    "email": 0.5,
-    "aadhaar_like": 0.95,
-    "card_like": 0.95,
-    "otp": 0.8,
-    "malware": 0.95,
-    "sql": 0.85,
-    "tor": 0.6,
-    "brute": 0.6,
-}
+# Avoid duplicate handlers if hot-reload / multiple imports happen
+if not any(isinstance(h, logging.FileHandler) and getattr(h, "baseFilename", None) == LOG_PATH for h in logger.handlers):
+    _handler = logging.FileHandler(LOG_PATH, encoding="utf-8")
+    _handler.setFormatter(logging.Formatter("%(message)s"))
+    logger.addHandler(_handler)
 
 
-# ---------- Middleware ----------
-class SecurityMiddleware(BaseHTTPMiddleware):
+def _now_iso() -> str:
+    return datetime.now().isoformat()
+
+
+def send_alert(subject: str, message: dict):
+    """Log security alerts (ALERT type lines in JSONL)"""
+    alert_log = {
+        "timestamp": _now_iso(),
+        "type": "ALERT",
+        "subject": subject,
+        "details": message
+    }
+    logger.info(json.dumps(alert_log))
+    print(f"🚨 {subject}: {message}")
+
+
+def log_event(entry: dict):
+    """Helper to log dashboard-friendly event rows"""
+    try:
+        logger.info(json.dumps(entry))
+    except Exception:
+        # Don't crash core pipeline if logging fails
+        pass
+
+
+# ✅ NEW: dashboard-friendly honeypot event row (no behavior change, only logging)
+def log_honeypot_hit(ip: str, path: str, geo: dict, tarpit_seconds: float):
+    entry = {
+        "timestamp": _now_iso(),
+        "action": "HONEYPOT",
+        "ip": ip,
+        "path": path,
+        "country": geo.get("country", "Unknown") if isinstance(geo, dict) else "Unknown",
+        "tor": bool(geo.get("tor", False)) if isinstance(geo, dict) else False,
+        "risk_breakdown": {
+            "phase1": 0.0,
+            "geo": round(float(geo.get("risk_score", 0.1)), 2) if isinstance(geo, dict) else 0.1,
+            "phase2_llm": 0.0,
+            "total": 0.99,  # honeypot hit = “uh oh”
+        },
+        "details": {
+            "tarpit_seconds": tarpit_seconds,
+        },
+    }
+    log_event(entry)
+
+
+# -----------------------------
+# PHASE 1: TOR + GEO middleware
+# -----------------------------
+VPNAPI_KEY = os.getenv("VPNAPI_KEY", "demo")  # put real key in .env
+
+class GeolocMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
-        ip_raw = request.headers.get("x-forwarded-for") or request.client.host
-        ip = ip_raw.split(",")[0].strip()
+        ip = request.headers.get("x-forwarded-for", str(request.client.host)).split(",")[0].strip()
+        geo = {"ip": ip, "country": "Unknown", "tor": False, "risk_score": 0.1}
 
-        geo_risk = 0.1
-        geo = {
-            "ip": ip,
-            "country": "Unknown",
-            "tor": False,
-            "risk": geo_risk,
-        }
+        try:
+            async with httpx.AsyncClient(timeout=2) as client:
+                resp = await client.get(f"https://vpnapi.io/api/{ip}?key={VPNAPI_KEY}")
+                data = resp.json()
 
-        request.state.security = {"threats": [], "geo": geo, "risk": geo_risk}
+                geo["country"] = data.get("country", "Unknown")
+                security = data.get("security", {}) or {}
+                geo["tor"] = bool(security.get("tor", False))
+                geo["risk_score"] = 0.95 if geo["tor"] else 0.3
+        except Exception:
+            # keep defaults
+            pass
+
+        request.state.geo = geo
         return await call_next(request)
 
-app.add_middleware(SecurityMiddleware)
+app.add_middleware(GeolocMiddleware)
 
-# ---------- Models ----------
+
+# -----------------------------
+# PHASE 4: Honeypot middleware
+# -----------------------------
+HONEYPOT_PATH_FRAGMENTS = ["/admin", "/honeypot", "/pentbox"]
+HONEYPOT_TARPIT_SECONDS = float(os.getenv("HONEYPOT_TARPIT_SECONDS", "10"))
+
+@app.middleware("http")
+async def honeypot_middleware(request: Request, call_next):
+    path = request.url.path
+
+    # ✅ Do NOT treat reading honeypot logs as a honeypot hit
+    if path.startswith("/api/honeypot-logs"):
+        return await call_next(request)
+
+    geo = request.state.geo if hasattr(request.state, "geo") else {"ip": "unknown", "country": "Unknown", "tor": False, "risk_score": 0.1}
+    client_ip = geo.get("ip", "unknown")
+
+    # Honeypot trap paths + tarpit
+    if any(h in path for h in HONEYPOT_PATH_FRAGMENTS):
+        # Existing alert line (kept)
+        send_alert("HONEYPOT_HIT", {"ip": client_ip, "path": path})
+
+        # ✅ NEW: dashboard-friendly honeypot event row (kept separate from ALERT)
+        log_honeypot_hit(
+            ip=client_ip,
+            path=path,
+            geo=geo,
+            tarpit_seconds=HONEYPOT_TARPIT_SECONDS
+        )
+
+        # Existing tarpit (kept)
+        await asyncio.sleep(int(os.getenv("HONEYPOT_TARPIT_SECONDS", "10")))
+
+    return await call_next(request)
+
+
+# -----------------------------
+# PHASE 1: Traditional threats
+# -----------------------------
+threat_patterns = {
+    "phishing": r"(bank|paypal|amazon|netflix).*?(login|click|verify|update)",
+    "malware": r"bash -i.*tcp|curl \| bash|wget -O- \| sh|nc.*-e /bin/sh",
+    "sql_injection": r"1' OR '1'='1|union select|'; DROP.*--",
+    "tor_c2": r"\.onion|185\.220\.|hidden service|tor.*c2",
+    "brute_force": r"admin|root|test|password123|user:pass"
+}
+
+class Phase1ThreatScanner:
+    def scan(self, text: str) -> List[str]:
+        threats = []
+        for threat, pattern in threat_patterns.items():
+            if re.search(pattern, text, re.IGNORECASE):
+                threats.append(threat)
+        return threats
+
+
+# -----------------------------
+# PHASE 2: OWASP LLM Top risks
+# -----------------------------
+class Phase2OWASLLMScanner:
+    OWASP_PATTERNS = {
+        "LLM01_PromptInjection": [
+            r"ignore previous.*instructions",
+            r"forget.*rules|you are now.*(DAN|evil|hacker)",
+            r"act as.*(hacker|malicious|ignore safety)"
+        ],
+        "LLM02_OutputHandling": [
+            r"<script>.*</script>", r"javascript:.*alert", r"onerror=",
+            r"data:.*text/html"
+        ],
+        "LLM03_SupplyChain": [
+            r"pip install.*(backdoor|evil|malware)",
+            r"npm.*(malicious|backdoor)"
+        ],
+        "LLM04_DoS": [
+            r"repeat.*10000|infinite loop|token limit",
+            r"generate.*100000"
+        ],
+        "LLM05_Poisoning": [
+            r"train data.*poison|fine-tune.*malicious",
+            r"inject.*training data"
+        ]
+    }
+
+    def scan(self, text: str) -> Dict[str, Any]:
+        detections = {}
+        for vuln, patterns in self.OWASP_PATTERNS.items():
+            for pattern in patterns:
+                if re.search(pattern, text, re.IGNORECASE):
+                    detections[vuln] = True
+                    break
+        risk_score = len(detections) / max(1, len(self.OWASP_PATTERNS))
+        return {"detections": detections, "risk_score": risk_score}
+
+
+phase1_scanner = Phase1ThreatScanner()
+phase2_scanner = Phase2OWASLLMScanner()
+
+
 class ChatRequest(BaseModel):
     prompt: str
-
-# ---------- Helpers ----------
-def log_event(event: dict):
-    logging.info(json.dumps(event))
-
-def detect_threats(text: str):
-    threats = []
-    evidence = {}
-
-    for name, pattern in THREAT_PATTERNS.items():
-        if re.search(pattern, text, re.IGNORECASE):
-            threats.append(name)
-            evidence[name] = extract_matches(text, name, pattern)
-
-    return threats, evidence
-
-def score_risk(threats, base=0.1):
-    if not threats:
-        return base
-    mx = max(SEVERITY.get(t, 0.6) for t in threats)
-    return max(base, mx)
-
-#Helper functions
-import uuid
-import time
-
-def extract_matches(text: str, name: str, pattern: str, max_matches: int = 3):
-    out = []
-    for m in re.finditer(pattern, text, re.IGNORECASE):
-        s = m.group(0)
-        # keep a short safe snippet
-        if len(s) > 40:
-            s = s[:18] + "…" + s[-8:]
-        out.append(s)
-        if len(out) >= max_matches:
-            break
-    return out
-
-REDACT_RULES = [
-    # password/token style
-    (re.compile(r"\b(password|passwd|pwd|token|secret|api[_-]?key)\b\s*(?:[:=]|is)\s*([^\s,;]+)", re.I),
-     r"\1=<REDACTED>"),
-    # OTP digits
-    (re.compile(r"\b(otp|one[-\s]?time\s?password|cvv|pin)\b\s*(?:[:=]|is)?\s*\d{4,8}\b", re.I),
-     r"\1=<REDACTED>"),
-    # PAN format
-    (re.compile(r"\b[A-Z]{5}[0-9]{4}[A-Z]\b", re.I),
-     "<PAN_REDACTED>"),
-    # Aadhaar-ish
-    (re.compile(r"\b\d{4}\s?\d{4}\s?\d{4}\b"), "<AADHAAR_REDACTED>"),
-    # Email
-    (re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"), "<EMAIL_REDACTED>"),
-]
-
-def redact_text(text: str) -> str:
-    out = text
-    for rgx, repl in REDACT_RULES:
-        out = rgx.sub(repl, out)
-    return out
+    model: str = "gpt-4o-mini"
 
 
-# ---------- Routes ----------
-@app.post("/chat")
-async def chat(payload: ChatRequest, req: Request):
-    security = getattr(req.state, "security", {"threats": [], "geo": {}, "risk": 0.1})
-
-    req_id = str(uuid.uuid4())[:8]
-    t0 = time.time()
-
-    text = payload.prompt
-    redacted = redact_text(text)
-
-    threats, evidence = detect_threats(text)
-    risk = score_risk(threats, security.get("risk", 0.1))
-
-    latency_ms = int((time.time() - t0) * 1000)
-
-    event_base = {
-        "timestamp": datetime.now().isoformat(),
-        "request_id": req_id,
-        "ip": security.get("geo", {}).get("ip"),
-        "risk": risk,
-        "threats": threats,
-        "evidence": evidence,
-        "latency_ms": latency_ms,
-        "prompt_preview": redacted[:80],  # IMPORTANT: log redacted
-    }
-
-    if risk > BLOCK_THRESHOLD:
-        log_event({**event_base, "action": "BLOCKED"})
-        raise HTTPException(403, f"Threats detected: {threats}")
-
-    log_event({**event_base, "action": "ALLOWED"})
-
-    return {
-        "response": f"Safe response to: {redacted[:30]}...",
-        "risk": risk,
-        "geo": security.get("geo", {}),
-        "threats": threats,
-        "evidence": evidence,
-        "redacted_prompt": redacted,
-        "request_id": req_id,
-        "latency_ms": latency_ms,
-    }
-
-
-@app.get("/logs")
-async def get_logs():
-    if not LOG_FILE.exists():
+# -----------------------------
+# Helper: read JSONL robustly
+# -----------------------------
+def _read_jsonl(path: str) -> List[dict]:
+    rows = []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rows.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+    except FileNotFoundError:
         return []
-    with open(LOG_FILE, "r", encoding="utf-8") as f:
-        lines = f.readlines()[-10:]
-    return [json.loads(line) for line in lines]
+    return rows
 
-@app.get("/health")
-async def health(req: Request):
-    security = getattr(req.state, "security", {"status": "no-security-context"})
-    return {"status": "healthy", "security": security, "block_threshold": BLOCK_THRESHOLD}
 
-@app.get("/policy")
-async def policy():
-    return {
-        "block_threshold": BLOCK_THRESHOLD,
-        "detectors": list(THREAT_PATTERNS.keys()),
-        "severity": SEVERITY,
+# -----------------------------
+# MAIN: /chat (Phase 1 + 2 + Geo)
+# -----------------------------
+@app.post("/chat")
+async def secure_chat(chat_req: ChatRequest, request: Request):
+    geo = getattr(request.state, "geo", {"ip": "unknown", "country": "Unknown", "tor": False, "risk_score": 0.1})
+    prompt = chat_req.prompt
+
+    # Phase 1
+    phase1_threats = phase1_scanner.scan(prompt)
+    phase1_risk = 0.95 if phase1_threats else 0.15
+
+    # Phase 2
+    phase2_results = phase2_scanner.scan(prompt)
+    phase2_risk = phase2_results["risk_score"]
+
+    # Combined risk
+    total_risk = (
+        phase1_risk * 0.4 +
+        float(geo.get("risk_score", 0.1)) * 0.3 +
+        phase2_risk * 0.3
+    )
+
+    risk_breakdown = {
+        "phase1": round(phase1_risk, 2),
+        "geo": round(float(geo.get("risk_score", 0.1)), 2),
+        "phase2_llm": round(phase2_risk, 2),
+        "total": round(total_risk, 2),
     }
+
+    # Block high risk
+    if total_risk > 0.75:
+        alert_data = {
+            "ip": geo.get("ip"),
+            "country": geo.get("country"),
+            "tor": geo.get("tor"),
+            "phase1_threats": phase1_threats,
+            "phase2_owasp": list(phase2_results["detections"].keys()),
+            "total_risk": round(total_risk, 2),
+            "prompt_snippet": prompt[:100],
+        }
+
+        # Existing alert line (kept)
+        send_alert("🚨 ENTERPRISE THREAT BLOCKED", alert_data)
+
+        # ✅ NEW: dashboard-friendly BLOCK row (so /logs can compute blocks/risk)
+        block_entry = {
+            "timestamp": _now_iso(),
+            "action": "BLOCK",
+            "ip": geo.get("ip"),
+            "country": geo.get("country"),
+            "tor": geo.get("tor"),
+            "phase1_threats": phase1_threats,
+            "phase2_owasp": list(phase2_results["detections"].keys()),
+            "risk_breakdown": risk_breakdown,
+            "prompt": prompt[:100],
+        }
+        log_event(block_entry)
+
+        raise HTTPException(
+            status_code=403,
+            detail=f"BLOCKED: P1={phase1_threats}, P2={list(phase2_results['detections'].keys())}, Risk={total_risk:.2f}"
+        )
+
+    # Success logging
+    log_entry = {
+        "timestamp": _now_iso(),
+        # ✅ Standardize action to match dashboard enums
+        "action": "ALLOW",
+        "ip": geo.get("ip"),
+        "country": geo.get("country"),
+        "tor": geo.get("tor"),
+        "phase1_threats": phase1_threats,
+        "phase2_owasp": list(phase2_results["detections"].keys()),
+        "risk_breakdown": risk_breakdown,
+        "prompt": prompt[:100],
+    }
+    log_event(log_entry)
+
+    return {
+        "response": f"✅ Safe response processed (Total Risk: {total_risk:.2f})",
+        "security_report": {
+            "phase1_threats": phase1_threats,
+            "phase2_owasp": list(phase2_results["detections"].keys()),
+            "geo": geo,
+            "risk_breakdown": risk_breakdown,
+        },
+    }
+
+
+# -----------------------------
+# Manual scan endpoint
+# -----------------------------
+@app.post("/scan/llm-vuln")
+async def llm_vuln_scan(prompt: str):
+    p1_threats = phase1_scanner.scan(prompt)
+    p2_results = phase2_scanner.scan(prompt)
+
+    combined_risk = max(
+        0.9 if p1_threats else 0.1,
+        p2_results["risk_score"]
+    )
+
+    return {
+        "phase1_threats": p1_threats,
+        "phase2_owasp": p2_results["detections"],
+        "risk_score": combined_risk,
+        "recommendation": "🚫 BLOCK" if combined_risk > 0.7 else "✅ ALLOW",
+        "confidence": round(combined_risk * 100, 1),
+    }
+
+
+# -----------------------------
+# Health
+# -----------------------------
+@app.get("/health")
+async def health(request: Request):
+    return {
+        "status": "healthy",
+        "version": "Phase1-4 COMPLETE",
+        "geo": getattr(request.state, "geo", {}),
+        "log_path": LOG_PATH,
+    }
+
+
+# -----------------------------
+# Logs (dashboard)
+# -----------------------------
+@app.get("/logs")
+async def get_logs(limit: int = 50):
+    logs = _read_jsonl(LOG_PATH)
+    return logs[-limit:]
+
+
+# -----------------------------
+# Threat leaderboard (dashboard charts)
+# -----------------------------
+@app.get("/threat-leaderboard")
+async def threat_leaderboard(limit: int = 10):
+    logs = _read_jsonl(LOG_PATH)
+    threat_counts: Dict[str, int] = {}
+
+    for log in logs:
+        p1 = log.get("phase1_threats", []) or []
+        p2 = log.get("phase2_owasp", []) or []
+        for threat in p1 + p2:
+            threat_counts[threat] = threat_counts.get(threat, 0) + 1
+
+    return sorted(threat_counts.items(), key=lambda x: x[1], reverse=True)[:limit]
+
+
+# -----------------------------
+# PHASE 4: PentBox honeypot log sync
+# -----------------------------
+@app.get("/api/honeypot-logs")
+async def pentbox_logs(tail: int = 50):
+    # keep same relative structure as homie's code
+    pentbox_log = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "honeypot-logs", "pentbox.log"))
+    logs = []
+
+    if os.path.exists(pentbox_log):
+        try:
+            with open(pentbox_log, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+
+            logs = [{"timestamp": _now_iso(), "line": line.strip()}
+                    for line in lines[-tail:] if line.strip()]
+
+            # Auto-add critical alerts into main log
+            for entry in logs:
+                up = entry["line"].upper()
+                if any(k in up for k in ["INTRUSION", "DETECTED", "ATTACK"]):
+                    alert_data = {
+                        "ip": "pentbox_honeypot",
+                        "threat_type": "PENTBOX_ALERT",
+                        "severity": "CRITICAL",
+                        "details": entry["line"][:200],
+                    }
+                    send_alert("🚨 PENTBOX HONEYPOT HIT", alert_data)
+
+        except Exception as e:
+            logs = [{"timestamp": _now_iso(), "line": f"PentBox log read error: {str(e)}"}]
+
+    total_alerts = sum(1 for l in logs if "INTRUSION" in l["line"].upper())
+    return {"honeypot_logs": logs, "total_alerts": total_alerts}
+
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run(app, host="0.0.0.0", port=8000)
