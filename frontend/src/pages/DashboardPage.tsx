@@ -12,6 +12,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
+import { AttackMap } from "@/features/map/AttackMap";
 
 /**
  * Runtime mode: LIVE hits backend, DEMO can use mocked data (your hooks/components decide).
@@ -199,14 +200,7 @@ export default function DashboardPage() {
               </CardHeader>
 
               <CardContent>
-                <div className="grid h-55 place-items-center rounded-xl border border-dashed bg-muted/20">
-                  <div className="text-center">
-                    <div className="text-sm font-medium">Map Loading…</div>
-                    <div className="mt-1 text-xs text-muted-foreground">
-                      Waiting for markers + tiles
-                    </div>
-                  </div>
-                </div>
+                <AttackMap live={isLive} />
               </CardContent>
             </Card>
 
