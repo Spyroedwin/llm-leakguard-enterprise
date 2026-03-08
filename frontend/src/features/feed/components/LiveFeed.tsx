@@ -23,35 +23,45 @@ export default function LiveFeed() {
   }
 
   return (
-    <div className="h-55 overflow-y-auto space-y-2 pr-2">
-      {data.map((log) => (
-        <div
-          key={log.id}
-          className="flex items-center justify-between rounded-lg border bg-muted/20 px-3 py-2 text-xs"
-        >
-          <div className="flex items-center gap-3">
-            <Badge
-              variant={
-                log.action === "BLOCK"
-                  ? "destructive"
-                  : log.action === "HONEY_POT_HIT"
-                    ? "secondary"
-                    : "outline"
-              }
-              className="rounded-full px-2"
-            >
-              {log.action}
-            </Badge>
+    <div className="max-h-70 overflow-y-auto space-y-2 pr-2">
+      {data.map((log: any, idx: number) => {
+        const key = `${log.timestamp ?? log.ts ?? "notime"}-${log.ip ?? "noip"}-${idx}`;
 
-            <span className="font-medium">{log.threat}</span>
-            <span className="text-muted-foreground">{log.ip}</span>
+        return (
+          <div
+            key={key}
+            className="flex items-center justify-between rounded-lg border bg-muted/20 px-3 py-2 text-xs"
+          >
+            <div className="flex items-center gap-3">
+              <Badge
+                variant={
+                  log.action === "BLOCK"
+                    ? "destructive"
+                    : log.action === "HONEY_POT_HIT"
+                      ? "secondary"
+                      : "outline"
+                }
+                className="rounded-full px-2"
+              >
+                {log.action ?? "INFO"}
+              </Badge>
+
+              <span className="font-medium">{log.threat ?? "unknown"}</span>
+              <span className="text-muted-foreground">
+                {log.ip ?? "unknown"}
+              </span>
+            </div>
+
+            <span className="text-muted-foreground">
+              {log.timestamp
+                ? new Date(log.timestamp).toLocaleTimeString()
+                : log.ts
+                  ? new Date(log.ts).toLocaleTimeString()
+                  : ""}
+            </span>
           </div>
-
-          <span className="text-muted-foreground">
-            {new Date(log.timestamp).toLocaleTimeString()}
-          </span>
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
