@@ -145,26 +145,17 @@ AI Threat Detection Engine
 Security Logging System
 
 Frontend
-
-React
-
-TypeScript
-
-TailwindCSS
-
-shadcn/ui
+     React
+     TypeScript
+     TailwindCSS
+     shadcn/ui
 
 Security Features
-
-Prompt Injection Detection
-
-Sensitive Data Monitoring
-
-Risk Scoring System
-
-Honeypot Endpoints
-
-Activity Logging
+     Prompt Injection Detection
+     Sensitive Data Monitoring
+     Risk Scoring System
+     Honeypot Endpoints
+     Activity Logging
 
 📂 Project Structure
 LLM-LeakGuard
@@ -185,17 +176,17 @@ LLM-LeakGuard
 ├── screenshots
 └── README.md
 🚀 Getting Started
+
 1️⃣ Clone Repository
 git clone https://github.com/Far-200/LLM-LeakGuard.git
 cd LLM-LeakGuard
+
 2️⃣ Backend Setup
 cd backend
 pip install -r requirements.txt
 uvicorn main:app --reload
 
-Backend runs on:
 
-http://127.0.0.1:8000
 3️⃣ Frontend Setup
 cd frontend
 npm install
